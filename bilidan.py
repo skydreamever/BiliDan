@@ -50,6 +50,7 @@ import xml.dom.minidom
 import zlib
 import socket
 import argparse
+from threading import Timer
 from binascii import unhexlify
 
 
@@ -77,11 +78,18 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
         sock = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
         server_address = (HOST,POST)
         result = sock.connect(server_address)
+
         initStr = '0101000c0000%04x00000000' % (roomid)
         send_data = unhexlify(initStr)
-        sock.sendall(send_data)
+        res = sock.sendall(send_data)
 
-        number = 0
+        timer_interval=20
+        def delayrun():
+            initStr = '01020004'
+            send_data = unhexlify(initStr)
+            res = sock.sendall(send_data)
+        t=Timer(timer_interval,delayrun)
+        t.start()
 
         while 1:
             data = sock.recv(2048)
@@ -91,7 +99,9 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
                 info = json.loads(data)
                 print(info['info'][2][1]+':'+info['info'][1])
             except Exception as e:
-            	pass
+                if data=='':
+                    sock.close()
+                    break;
 
     def parse_url(url):
         '''Parse a bilibili.com URL
@@ -289,7 +299,8 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
             player_process = subprocess.Popen(command_line)
         try:
             if live:
-                connect(roomid)
+                while 1:
+                    connect(roomid)
             player_process.wait()
         except KeyboardInterrupt:
             logging.info('Terminating media player...')
