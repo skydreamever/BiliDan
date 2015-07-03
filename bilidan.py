@@ -48,6 +48,9 @@ import urllib.parse
 import urllib.request
 import xml.dom.minidom
 import zlib
+import socket
+import argparse
+from binascii import unhexlify
 
 
 USER_AGENT_PLAYER = 'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:6.0.2) Gecko/20100101 Firefox/6.0.2 Fengfan/1.0'
@@ -55,16 +58,40 @@ USER_AGENT_API = 'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:6.0.2) Gecko/20100101 F
 APPKEY = '85eb6835b0a1034e'  # The same key as in original Biligrab
 APPSEC = '2ad42749773c441109bdc0191257a664'  # Do not abuse please, get one yourself if you need
 BILIGRAB_HEADER = {'User-Agent': USER_AGENT_API, 'Cache-Control': 'no-cache', 'Pragma': 'no-cache'}
+HOST = "livecmt.bilibili.com"
+POST = 88
 
-
-def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, quality=None, source=None, keep_fps=False, mpvflags=[], d2aflags={}):
+def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, quality=None, source=None, keep_fps=False, live=False, mpvflags=[], d2aflags={}):
 
     url_get_metadata = 'http://api.bilibili.com/view?'
     url_get_comment = 'http://comment.bilibili.com/%(cid)s.xml'
-    if source == 'overseas':
+    if live:
+    	url_get_media = 'http://live.bilibili.com/api/playurl?'
+    elif source == 'overseas':
         url_get_media = 'http://interface.bilibili.com/v_cdn_play?'
     else:
         url_get_media = 'http://interface.bilibili.com/playurl?'
+
+    def connect(roomid):
+        roomid = int(roomid)
+        sock = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+        server_address = (HOST,POST)
+        result = sock.connect(server_address)
+        initStr = '0101000c0000%04x00000000' % (roomid)
+        send_data = unhexlify(initStr)
+        sock.sendall(send_data)
+
+        number = 0
+
+        while 1:
+            data = sock.recv(2048)
+            data = data.decode('utf-8','ignore')
+            data = data[3:] #坑死了，第0-2个竟然是null
+            try:
+                info = json.loads(data)
+                print(info['info'][2][1]+':'+info['info'][1])
+            except Exception as e:
+            	pass
 
     def parse_url(url):
         '''Parse a bilibili.com URL
@@ -238,7 +265,9 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
             command_line += ['--media-title', video_metadata.get('title', url)]
         if is_playlist or len(media_urls) > 1:
             command_line += ['--merge-files']
-        if mpv_version_gte_0_4:
+        if live:
+            command_line += ['--no-video-aspect']
+        elif mpv_version_gte_0_4:
             command_line += ['--no-video-aspect', '--sub-ass', '--sub-file', comment_out.name]
         else:
             command_line += ['--no-aspect', '--ass', '--sub', comment_out.name]
@@ -254,8 +283,9 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
             command_line += ['--']
         command_line += media_urls
         log_command(command_line)
-        player_process = subprocess.Popen(command_line)
+        player_process = subprocess.Popen(command_line,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         try:
+            connect(roomid)
             player_process.wait()
         except KeyboardInterrupt:
             logging.info('Terminating media player...')
@@ -271,38 +301,48 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
             raise
         return player_process.returncode
 
-    aid, pid = parse_url(url)
+    if live:
 
-    logging.info('Loading video info...')
-    video_metadata = fetch_video_metadata(aid, pid)
-    logging.info('Got video cid: %s' % video_metadata['cid'])
+        regex = re.compile('http:/*[^/]+/(\\d+)?(\\?|#|$)')
+        regex_match = regex.match(url)
+        roomid = regex_match.group(1)
+        media_urls = get_media_urls(roomid)
+        print(media_urls)
+        player_exit_code = launch_player({}, media_urls, comment_out = None, increase_fps=not keep_fps)
 
-    logging.info('Loading video content...')
-    if media is None:
-        media_urls = get_media_urls(video_metadata['cid'])
     else:
-        media_urls = [media]
-    logging.info('Got media URLs:'+''.join(('\n      %d: %s' % (i+1, j) for i, j in enumerate(media_urls))))
 
-    logging.info('Determining video resolution...')
-    video_size = get_video_size(media_urls)
-    logging.info('Video resolution: %sx%s' % video_size)
-    if video_size[0] > 0 and video_size[1] > 0:
-        video_size = (video_size[0]*1080/video_size[1], 1080)  # Simply fix ASS resolution to 1080p
-    else:
-        log_or_raise(ValueError('Can not get video size. Comments may be wrongly positioned.'), debug=debug)
-        video_size = (1920, 1080)
+        aid, pid = parse_url(url)
+        logging.info('Loading video info...')
+        video_metadata = fetch_video_metadata(aid, pid)
+        logging.info('Got video cid: %s' % video_metadata['cid'])
 
-    logging.info('Loading comments...')
-    comment_out = convert_comments(video_metadata['cid'], video_size)
+        logging.info('Loading video content...')
+        if media is None:
+            media_urls = get_media_urls(video_metadata['cid'])
+        else:
+            media_urls = [media]
+            logging.info('Got media URLs:'+''.join(('\n      %d: %s' % (i+1, j) for i, j in enumerate(media_urls))))
 
-    logging.info('Launching media player...')
-    player_exit_code = launch_player(video_metadata, media_urls, comment_out, increase_fps=not keep_fps)
+        logging.info('Determining video resolution...')
+        video_size = get_video_size(media_urls)
+        logging.info('Video resolution: %sx%s' % video_size)
+        if video_size[0] > 0 and video_size[1] > 0:
+            video_size = (video_size[0]*1080/video_size[1], 1080)  # Simply fix ASS resolution to 1080p
+        else:
+            log_or_raise(ValueError('Can not get video size. Comments may be wrongly positioned.'), debug=debug)
+            video_size = (1920, 1080)
 
-    if player_exit_code == 0:
-        os.remove(comment_out.name)
+        logging.info('Loading comments...')
+        comment_out = convert_comments(video_metadata['cid'], video_size)
 
-    return player_exit_code
+        logging.info('Launching media player...')
+        player_exit_code = launch_player(video_metadata, media_urls, comment_out, increase_fps=not keep_fps)
+
+        if player_exit_code == 0:
+            os.remove(comment_out.name)
+
+        return player_exit_code
 
 
 def fetch_url(url, *, user_agent=USER_AGENT_PLAYER, cookie=None):
@@ -440,6 +480,7 @@ def main():
     parser.add_argument('--mpvflags', metavar='FLAGS', default='', help='Parameters passed to mpv, formed as \'--option1=value1 --option2=value2\'')
     parser.add_argument('--d2aflags', '--danmaku2assflags', metavar='FLAGS', default='', help='Parameters passed to Danmaku2ASS, formed as \'option1=value1,option2=value2\'')
     parser.add_argument('url', metavar='URL', nargs='+', help='Bilibili video page URL (http://www.bilibili.com/video/av*/)')
+    parser.add_argument('-l','--live',action='store_true',help='Play Bilibili Live video')
     args = parser.parse_args()
     logging.basicConfig(format='%(levelname)s: %(message)s', level=logging.DEBUG if args.verbose else logging.INFO)
     if not check_env(debug=args.debug):
@@ -453,7 +494,7 @@ def main():
     retval = 0
     for url in args.url:
         try:
-            retval = retval or biligrab(url, debug=args.debug, verbose=args.verbose, media=args.media, cookie=args.cookie, quality=quality, source=source, keep_fps=args.keep_fps, mpvflags=mpvflags, d2aflags=d2aflags)
+            retval = retval or biligrab(url, debug=args.debug, verbose=args.verbose, media=args.media, cookie=args.cookie, quality=quality, source=source, keep_fps=args.keep_fps, live=args.live, mpvflags=mpvflags, d2aflags=d2aflags)
         except OSError as e:
             logging.error(e)
             retval = retval or e.errno
