@@ -283,9 +283,13 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
             command_line += ['--']
         command_line += media_urls
         log_command(command_line)
-        player_process = subprocess.Popen(command_line,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        if live:
+            player_process = subprocess.Popen(command_line,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        else:
+            player_process = subprocess.Popen(command_line)
         try:
-            connect(roomid)
+            if live:
+                connect(roomid)
             player_process.wait()
         except KeyboardInterrupt:
             logging.info('Terminating media player...')
